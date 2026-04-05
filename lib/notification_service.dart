@@ -58,6 +58,7 @@ class NotificationService {
 
   bool _fullScreenIntentGranted = false;
   bool _notificationPermissionGranted = false;
+  bool _batteryOptimizationExempted = false;
 
   /// Whether the USE_FULL_SCREEN_INTENT permission is currently granted.
   bool get canUseFullScreenIntent => _fullScreenIntentGranted;
@@ -65,10 +66,14 @@ class NotificationService {
   /// Whether the user has granted notification (alert/sound/badge) permission.
   bool get notificationPermissionGranted => _notificationPermissionGranted;
 
+  /// Whether the app is exempted from battery optimization ("No restrictions").
+  bool get batteryOptimizationExempted => _batteryOptimizationExempted;
+
   Future<void> initialize() async {
     await _initLocalNotifications();
     await _requestPermissions();
     await _checkFullScreenIntentPermission();
+    await _checkBatteryOptimization();
     await _setupFcmHandlers();
   }
 
@@ -138,8 +143,14 @@ class NotificationService {
   }
 
   /// Shows a full-screen intent notification that appears over the lock screen
-  /// on Android. Falls back to a regular high-importance notification if the
-  /// USE_FULL_SCREEN_INTENT permission is not granted (Android 14+).
+  /// on Android. Falls back to a persistent HUN (heads-up notification, 60s)
+  /// if USE_FULL_SCREEN_INTENT is not granted (Android 14+).
+  ///
+  /// Per https://source.android.com/docs/core/permissions/fsi-limits:
+  /// - FSI granted + locked/off screen → launches full-screen activity
+  /// - FSI denied  + locked/off screen → HUN shown for 60 s (Android fallback)
+  /// - Google Play auto-revokes FSI for apps that are NOT calling/alarm apps.
+  ///   Always use [AndroidNotificationCategory.call] or [.alarm] to qualify.
   ///
   /// [id] must be unique per active notification.
   Future<void> showFullScreenNotification({
@@ -147,16 +158,16 @@ class NotificationService {
     required String title,
     required String body,
     String? payload,
-
-    /// Category hint — use [AndroidNotificationCategory.call] for incoming
-    /// calls, [AndroidNotificationCategory.alarm] for alarms, etc.
+    // Keep as .call or .alarm so Android 14+ auto-grant applies and the
+    // notification is treated as time-sensitive by the system.
     AndroidNotificationCategory category = AndroidNotificationCategory.call,
   }) async {
     // Default payload so _onNotificationTapped can route to FullScreenAlertPage.
     final resolvedPayload = payload ?? fullScreenPayload;
 
-    // On Android 14+ we can only use full-screen intent when the permission
-    // is granted. On older Android versions it is always allowed.
+    // Re-check the permission right before sending — the user may have
+    // revoked it after the last refresh (e.g. via Settings while app ran).
+    await _checkFullScreenIntentPermission();
     final useFullScreen = Platform.isAndroid && _fullScreenIntentGranted;
 
     await _localNotifications.show(
@@ -218,6 +229,33 @@ class NotificationService {
     if (!Platform.isAndroid) return;
     try {
       await _fullScreenMethodChannel.invokeMethod<void>('openNotificationSettings');
+    } catch (_) {}
+  }
+
+  /// Checks whether the app is exempted from battery optimisation.
+  Future<void> _checkBatteryOptimization() async {
+    if (!Platform.isAndroid) {
+      _batteryOptimizationExempted = true;
+      return;
+    }
+    try {
+      _batteryOptimizationExempted = await _fullScreenMethodChannel
+              .invokeMethod<bool>('isIgnoringBatteryOptimizations') ??
+          false;
+    } catch (_) {
+      _batteryOptimizationExempted = false;
+    }
+  }
+
+  /// Re-checks battery optimisation status (call after returning from Settings).
+  Future<void> refreshBatteryOptimization() => _checkBatteryOptimization();
+
+  /// Opens the system dialog to request battery optimisation exemption.
+  Future<void> requestIgnoreBatteryOptimizations() async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _fullScreenMethodChannel
+          .invokeMethod<void>('requestIgnoreBatteryOptimizations');
     } catch (_) {}
   }
 

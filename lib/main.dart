@@ -46,6 +46,7 @@ class _NotificationHomePageState extends State<NotificationHomePage>
   String? _fcmToken;
   bool _notificationPermissionGranted = false;
   bool _fullScreenPermissionGranted = false;
+  bool _batteryOptimizationExempted = false;
 
   @override
   void initState() {
@@ -101,19 +102,26 @@ class _NotificationHomePageState extends State<NotificationHomePage>
   }
 
   Future<void> _loadToken() async {
-    final token = await NotificationService.instance.getToken();
-    setState(() => _fcmToken = token);
+    try {
+      final token = await NotificationService.instance.getToken();
+      setState(() => _fcmToken = token);
+    } catch (e) {
+      setState(() => _fcmToken = 'Unavailable — check internet / Play Services');
+    }
   }
 
   Future<void> _refreshPermissions() async {
     // Re-query the native side so we always reflect the real system state.
     await NotificationService.instance.refreshFullScreenIntentPermission();
+    await NotificationService.instance.refreshBatteryOptimization();
     if (!mounted) return;
     setState(() {
       _notificationPermissionGranted =
           NotificationService.instance.notificationPermissionGranted;
       _fullScreenPermissionGranted =
           NotificationService.instance.canUseFullScreenIntent;
+      _batteryOptimizationExempted =
+          NotificationService.instance.batteryOptimizationExempted;
     });
   }
 
@@ -133,6 +141,12 @@ class _NotificationHomePageState extends State<NotificationHomePage>
     await NotificationService.instance.requestFullScreenIntentPermission();
     // Don't refresh here — the user is leaving to Settings now.
     // The refresh happens automatically when they return via didChangeAppLifecycleState.
+  }
+
+  Future<void> _requestBatteryOptimization() async {
+    if (_batteryOptimizationExempted) return;
+    await NotificationService.instance.requestIgnoreBatteryOptimizations();
+    // Refresh happens on resume via didChangeAppLifecycleState.
   }
 
   @override
@@ -161,8 +175,10 @@ class _NotificationHomePageState extends State<NotificationHomePage>
           _PermissionsCard(
             notificationGranted: _notificationPermissionGranted,
             fullScreenGranted: _fullScreenPermissionGranted,
+            batteryOptimizationExempted: _batteryOptimizationExempted,
             onRequestNotification: _requestNotificationPermission,
             onRequestFullScreen: _requestFullScreenPermission,
+            onRequestBatteryOptimization: _requestBatteryOptimization,
           ),
           const Divider(height: 1),
           Expanded(
@@ -203,14 +219,18 @@ class _PermissionsCard extends StatelessWidget {
   const _PermissionsCard({
     required this.notificationGranted,
     required this.fullScreenGranted,
+    required this.batteryOptimizationExempted,
     required this.onRequestNotification,
     required this.onRequestFullScreen,
+    required this.onRequestBatteryOptimization,
   });
 
   final bool notificationGranted;
   final bool fullScreenGranted;
+  final bool batteryOptimizationExempted;
   final VoidCallback onRequestNotification;
   final VoidCallback onRequestFullScreen;
+  final VoidCallback onRequestBatteryOptimization;
 
   @override
   Widget build(BuildContext context) {
@@ -234,8 +254,16 @@ class _PermissionsCard extends StatelessWidget {
           _PermissionRow(
             icon: Icons.fullscreen,
             label: 'Full-Screen Intent (Android 14+)',
+            sublabel: 'Play Store auto-revokes for non-call/alarm apps',
             granted: fullScreenGranted,
             onRequest: onRequestFullScreen,
+          ),
+          const SizedBox(height: 6),
+          _PermissionRow(
+            icon: Icons.battery_saver,
+            label: 'Battery Optimization (No restrictions)',
+            granted: batteryOptimizationExempted,
+            onRequest: onRequestBatteryOptimization,
           ),
         ],
       ),
@@ -247,12 +275,14 @@ class _PermissionRow extends StatelessWidget {
   const _PermissionRow({
     required this.icon,
     required this.label,
+    this.sublabel,
     required this.granted,
     required this.onRequest,
   });
 
   final IconData icon;
   final String label;
+  final String? sublabel;
   final bool granted;
   final VoidCallback onRequest;
 
@@ -263,7 +293,19 @@ class _PermissionRow extends StatelessWidget {
       children: [
         Icon(icon, size: 20, color: color),
         const SizedBox(width: 8),
-        Expanded(child: Text(label, style: const TextStyle(fontSize: 13))),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(label, style: const TextStyle(fontSize: 13)),
+              if (sublabel != null)
+                Text(
+                  sublabel!,
+                  style: const TextStyle(fontSize: 10, color: Colors.grey),
+                ),
+            ],
+          ),
+        ),
         granted
             ? const Chip(
                 label: Text('Granted', style: TextStyle(fontSize: 11)),
